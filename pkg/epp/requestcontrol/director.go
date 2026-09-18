@@ -327,6 +327,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	// Run admit request plugins
 	if denyReason := d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods); denyReason != nil {
+		var admissionErr errcommon.Error
+		if errors.As(denyReason, &admissionErr) && admissionErr.Code == errcommon.ResourceExhausted {
+			return reqCtx, admissionErr
+		}
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: fmt.Errorf("request cannot be admitted: %w", denyReason).Error()}
 	}
 
@@ -736,7 +740,14 @@ func (d *Director) runAdmissionPlugins(ctx context.Context,
 	for _, plugin := range d.requestControlPlugins.admissionPlugins {
 		loggerDebug.Info("Running Admit plugin", "plugin", plugin.TypedName())
 		before := time.Now()
-		denyReason := plugin.Admit(ctx, request, endpoints)
+		var denyReason error
+		if poolPlugin, ok := plugin.(fwkrc.PoolScopedAdmitter); ok {
+			denyReason = poolPlugin.AdmitPool(ctx, request, func() []fwksched.Endpoint {
+				return d.toSchedulerEndpoints(d.datastore.PodList(datastore.AllPodsPredicate))
+			})
+		} else {
+			denyReason = plugin.Admit(ctx, request, endpoints)
+		}
 		metrics.RecordPluginProcessingLatency(fwkrc.AdmissionExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
 		if denyReason != nil {
 			loggerDebug.Info("Admit plugin denied the request", "plugin", plugin.TypedName(), "reason", denyReason.Error())

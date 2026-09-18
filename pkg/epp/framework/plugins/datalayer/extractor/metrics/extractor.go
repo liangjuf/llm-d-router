@@ -101,12 +101,14 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	current := ep.GetMetrics()
 	clone := current.Clone()
 	updated := false
+	observedAt := time.Now()
 
 	if spec := mapping.TotalQueuedRequests; spec != nil { // extract queued requests
 		if metric, err := spec.getLatestMetric(families); err != nil {
 			errs = append(errs, err)
 		} else {
 			clone.WaitingQueueSize = int(extractValue(metric))
+			ep.GetAttributes().Put(attrmetrics.WaitingQueueSampleKey, attrmetrics.MetricSample{Value: extractValue(metric), UpdatedAt: observedAt})
 			updated = true
 		}
 	}
@@ -125,6 +127,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			errs = append(errs, err)
 		} else {
 			clone.KVCacheUsagePercent = extractValue(metric)
+			ep.GetAttributes().Put(attrmetrics.KVCacheUtilizationSampleKey, attrmetrics.MetricSample{Value: clone.KVCacheUsagePercent, UpdatedAt: observedAt})
 			updated = true
 		}
 	}
@@ -179,12 +182,13 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			continue
 		}
 		ep.GetAttributes().Put(custom.AttributeKey, attrmetrics.ScalarMetricValue(extractValue(metric)))
+		ep.GetAttributes().Put(attrmetrics.ScalarMetricSampleKey(custom.AttributeKey), attrmetrics.MetricSample{Value: extractValue(metric), UpdatedAt: observedAt})
 		updated = true
 	}
 
 	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().ID)
 	if updated {
-		clone.UpdateTime = time.Now()
+		clone.UpdateTime = observedAt
 		logger.V(logutil.TRACE).Info("Refreshed metrics",
 			"metrics", mapping.MetricNames(),
 			"updated", clone,
