@@ -171,13 +171,12 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 		for ek, rks := range mappings {
 			m.engineToRequestKeys.Add(ek, rks)
 		}
+		// Hold m.mu to prevent Evict from checking emptiness and removing the
+		// engine→request mapping while we are inserting pod entries. Native
+		// hashing adds with engineKeys == nil and needs no mapping lock.
+		m.mu.Lock()
+		defer m.mu.Unlock()
 	}
-
-	// Store requestKey -> PodCache mappings for all request keys.
-	// Hold m.mu to prevent Evict from checking emptiness and removing the
-	// engine→request mapping while we are inserting pod entries.
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	for _, requestKey := range requestKeys {
 		var podCache *PodCache
