@@ -228,4 +228,47 @@ func TestPriorityBypassDoesNotChangeBreakerState(t *testing.T) {
 		return nil
 	}))
 	require.Error(t, a.Admit(ctx, request(1, 1, -1), breakerPool(0, 0, .89, 0)))
+	require.Equal(t, float64(2), testutil.ToFloat64(
+		admissionDecisions.WithLabelValues(t.Name(), decisionReject, reasonDecodeKV),
+	))
+	require.Equal(t, float64(0), testutil.ToFloat64(
+		admissionDecisions.WithLabelValues(t.Name(), decisionAdmit, ""),
+	))
+}
+
+func TestAdmissionDecisionMetrics(t *testing.T) {
+	tests := []struct {
+		name         string
+		pool         []fwksched.Endpoint
+		wantDecision string
+		wantReason   string
+		wantErr      bool
+	}{
+		{name: "admit", pool: breakerPool(0, 0, .1, 0), wantDecision: "admit"},
+		{name: "decode waiting", pool: breakerPool(0, 4, .1, 0), wantDecision: "reject", wantReason: "decode_waiting", wantErr: true},
+		{name: "decode kv", pool: breakerPool(0, 0, .92, 0), wantDecision: "reject", wantReason: "decode_kv", wantErr: true},
+		{name: "decode prealloc", pool: breakerPool(0, 0, .1, 8), wantDecision: "reject", wantReason: "decode_prealloc", wantErr: true},
+		{name: "prefill waiting", pool: breakerPool(4, 0, .1, 0), wantDecision: "reject", wantReason: "prefill_waiting", wantErr: true},
+		{name: "stale metrics", pool: []fwksched.Endpoint{
+			endpoint("prefill", bylabel.RolePrefill, 0, .1, 100000, 0, 0, time.Now().Add(-time.Minute)),
+			endpoint("decode", bylabel.RoleDecode, 0, .1, 100000, 0, 0, time.Now()),
+		}, wantDecision: "reject", wantReason: "stale_metrics", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			admitter, err := New(t.Name(), DefaultConfig())
+			require.NoError(t, err)
+
+			err = admitter.Admit(context.Background(), request(1, 1, 0), tt.pool)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, float64(1), testutil.ToFloat64(
+				admissionDecisions.WithLabelValues(t.Name(), tt.wantDecision, tt.wantReason),
+			))
+		})
+	}
 }

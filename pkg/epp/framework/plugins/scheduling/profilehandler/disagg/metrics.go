@@ -24,6 +24,7 @@ import (
 	compbasemetrics "k8s.io/component-base/metrics"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -85,6 +86,16 @@ var (
 		},
 		[]string{"plugin_name", "plugin_type", "model_name", "decision_type"},
 	)
+
+	// LlmdRouteSelectionsTotal records finalized disaggregated endpoint selections.
+	LlmdRouteSelectionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "route_selections_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of selected endpoints by disaggregated serving role.", compbasemetrics.ALPHA),
+		},
+		[]string{"role", "endpoint_name"},
+	)
 )
 
 func registerMetrics(registerer prometheus.Registerer) error {
@@ -96,6 +107,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		LlmdPDDecisionCount,
 		SchedulerDisaggDecisionCount,
 		LlmdDisaggDecisionCount,
+		LlmdRouteSelectionsTotal,
 	} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
@@ -106,6 +118,24 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		}
 	}
 	return nil
+}
+
+func recordPrefillRouteSelection(result *scheduling.ProfileRunResult) {
+	if result == nil || len(result.TargetEndpoints) == 0 || result.TargetEndpoints[0] == nil {
+		return
+	}
+	metadata := result.TargetEndpoints[0].GetMetadata()
+	if metadata == nil {
+		return
+	}
+	endpointName := metadata.Name
+	if endpointName == "" {
+		endpointName = metadata.ID.Name
+	}
+	if endpointName == "" {
+		return
+	}
+	LlmdRouteSelectionsTotal.WithLabelValues("prefill", endpointName).Inc()
 }
 
 // RecordPDDecision increments the counter for a specific P/D routing decision.

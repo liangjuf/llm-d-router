@@ -121,6 +121,13 @@ and 0 while admitting. It reports the last evaluated state, not continuously
 polled health. The plugin logs each open/close transition with its reason and
 logs endpoint exclusion details at debug verbosity.
 
+`llm_d_epp_pd_capacity_admission_decisions_total{plugin_name="...",decision="admit|reject",reason="..."}`
+increments once per evaluated request. Admitted requests use an empty reason.
+Rejected requests use one primary reason: `stale_metrics`, `prefill_waiting`,
+`decode_waiting`, `decode_kv`, or `decode_prealloc`. If multiple signals block
+the pool, that order determines the reported reason. Priority-bypassed requests
+are not evaluated and do not increment the counter.
+
 ## Flow-control ordering
 
 The bounded flow-control admission controller runs before endpoint discovery,

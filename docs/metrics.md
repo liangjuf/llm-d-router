@@ -109,6 +109,14 @@ Label `{name}` (the pool name).
 |---|---|---|
 | `scheduler_e2e_duration_seconds` | Histogram | End-to-end scheduling latency. |
 | `scheduler_attempts_total` | Counter | Scheduling attempts; labels `{status, target_model_name, endpoint_name, namespace, port}`. |
+| `route_selections_total` | Counter | Finalized prefill endpoint selections; labels `{role="prefill", endpoint_name}`. Decode selections remain available through `scheduler_attempts_total`. |
+
+### P/D capacity admission
+
+| Name | Type | Notes |
+|---|---|---|
+| `pd_capacity_breaker_open` | Gauge | Last evaluated P/D admission state; labels `{plugin_name}`. One means rejecting and zero means admitting. |
+| `pd_capacity_admission_decisions_total` | Counter | Evaluated admission decisions; labels `{plugin_name, decision, reason}`. Admitted requests use an empty reason; rejection reasons are `stale_metrics`, `prefill_waiting`, `decode_waiting`, `decode_kv`, or `decode_prealloc`. |
 
 ### EPP processing overhead
 

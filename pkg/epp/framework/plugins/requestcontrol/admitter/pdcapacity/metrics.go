@@ -35,10 +35,18 @@ var breakerOpen = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Help:      metricsutil.HelpMsgWithStability("P/D pool admission breaker state: 1 is open (rejecting), 0 is closed (admitting). Updated on evaluated requests.", compbasemetrics.ALPHA),
 }, []string{"plugin_name"})
 
+var admissionDecisions = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+	Name:      "pd_capacity_admission_decisions_total",
+	Help:      metricsutil.HelpMsgWithStability("P/D capacity admission decisions. Reject reasons identify the primary blocking signal; admitted requests use an empty reason.", compbasemetrics.ALPHA),
+}, []string{"plugin_name", "decision", "reason"})
+
 var registerMetricsOnce sync.Once
 
 func registerMetrics() {
-	registerMetricsOnce.Do(func() { ctrlmetrics.Registry.MustRegister(breakerOpen) })
+	registerMetricsOnce.Do(func() {
+		ctrlmetrics.Registry.MustRegister(breakerOpen, admissionDecisions)
+	})
 }
 
 // setOpen is called with mu held.

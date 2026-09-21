@@ -274,6 +274,7 @@ func (h *PdProfileHandler) ProcessResults(_ context.Context, request *scheduling
 	if prefillRunResult, exists := profileResults[h.prefillProfile]; exists && prefillRunResult != nil {
 		// Add the prefill profile to the results
 		updatedResults[h.prefillProfile] = prefillRunResult
+		recordPrefillRouteSelection(prefillRunResult)
 	}
 
 	return &scheduling.SchedulingResult{
