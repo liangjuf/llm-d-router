@@ -19,7 +19,6 @@ package maxscore
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -27,6 +26,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -137,7 +137,7 @@ func TestPickMaxScorePicker(t *testing.T) {
 	}
 }
 
-func TestPickRandomlyWithinTopK(t *testing.T) {
+func TestPickRandomlyWithinTopScoreRatio(t *testing.T) {
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil)
 	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil)
 	endpoint3 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod3"}}, nil, nil)
@@ -145,35 +145,40 @@ func TestPickRandomlyWithinTopK(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		topK           int
+		topScoreRatio  float64
+		scores         []float64
 		allowed        map[string]bool
 		wantAllSeen    bool
 		iterationCount int
 	}{
 		{
-			name:           "top one preserves highest score selection",
-			topK:           1,
+			name:           "ratio one preserves highest score selection",
+			topScoreRatio:  1,
+			scores:         []float64{40, 30, 20, 10},
 			allowed:        map[string]bool{"pod1": true},
 			wantAllSeen:    true,
 			iterationCount: 20,
 		},
 		{
-			name:           "top two samples only the two highest scores",
-			topK:           2,
+			name:           "samples endpoints within five percent of maximum",
+			topScoreRatio:  0.95,
+			scores:         []float64{100, 96, 94, 20},
 			allowed:        map[string]bool{"pod1": true, "pod2": true},
 			wantAllSeen:    true,
 			iterationCount: 500,
 		},
 		{
-			name:           "top three samples only the three highest scores",
-			topK:           3,
-			allowed:        map[string]bool{"pod1": true, "pod2": true, "pod3": true},
+			name:           "includes endpoint exactly at ratio boundary",
+			topScoreRatio:  0.95,
+			scores:         []float64{100, 95, 94, 20},
+			allowed:        map[string]bool{"pod1": true, "pod2": true},
 			wantAllSeen:    true,
 			iterationCount: 500,
 		},
 		{
-			name:           "top k larger than candidates samples all candidates",
-			topK:           10,
+			name:           "all zero scores sample all candidates",
+			topScoreRatio:  0.95,
+			scores:         []float64{0, 0, 0, 0},
 			allowed:        map[string]bool{"pod1": true, "pod2": true, "pod3": true, "pod4": true},
 			wantAllSeen:    true,
 			iterationCount: 500,
@@ -182,14 +187,14 @@ func TestPickRandomlyWithinTopK(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			p := NewMaxScorePicker(1).WithTopK(test.topK)
+			p := NewMaxScorePicker(1).WithTopScoreRatio(test.topScoreRatio)
 			seen := make(map[string]bool)
 			for range test.iterationCount {
 				input := []*fwksched.ScoredEndpoint{
-					{Endpoint: endpoint1, Score: 40},
-					{Endpoint: endpoint2, Score: 30},
-					{Endpoint: endpoint3, Score: 20},
-					{Endpoint: endpoint4, Score: 10},
+					{Endpoint: endpoint1, Score: test.scores[0]},
+					{Endpoint: endpoint2, Score: test.scores[1]},
+					{Endpoint: endpoint3, Score: test.scores[2]},
+					{Endpoint: endpoint4, Score: test.scores[3]},
 				}
 				result := p.Pick(context.Background(), input)
 				if len(result.TargetEndpoints) != 1 {
@@ -197,7 +202,7 @@ func TestPickRandomlyWithinTopK(t *testing.T) {
 				}
 				name := result.TargetEndpoints[0].GetMetadata().ID.Name
 				if !test.allowed[name] {
-					t.Fatalf("selected endpoint %q outside top %d", name, test.topK)
+					t.Fatalf("selected endpoint %q outside top score ratio %v", name, test.topScoreRatio)
 				}
 				seen[name] = true
 			}
@@ -209,21 +214,30 @@ func TestPickRandomlyWithinTopK(t *testing.T) {
 	}
 }
 
-func TestMaxScorePickerFactoryTopK(t *testing.T) {
+func TestMaxScorePickerFactoryTopScoreRatio(t *testing.T) {
 	tests := []struct {
-		name     string
-		config   string
-		wantTopK int
+		name              string
+		config            string
+		wantTopScoreRatio float64
+		wantError         bool
 	}{
-		{name: "explicit top k", config: `{"maxNumOfEndpoints":1,"topK":3}`, wantTopK: 3},
-		{name: "omitted top k defaults to one", config: `{"maxNumOfEndpoints":1}`, wantTopK: 1},
-		{name: "invalid top k defaults to one", config: `{"maxNumOfEndpoints":1,"topK":0}`, wantTopK: 1},
+		{name: "explicit ratio", config: `{"maxNumOfEndpoints":1,"topScoreRatio":0.95}`, wantTopScoreRatio: 0.95},
+		{name: "omitted ratio defaults to one", config: `{"maxNumOfEndpoints":1}`, wantTopScoreRatio: 1},
+		{name: "zero ratio is invalid", config: `{"maxNumOfEndpoints":1,"topScoreRatio":0}`, wantError: true},
+		{name: "ratio above one is invalid", config: `{"maxNumOfEndpoints":1,"topScoreRatio":1.01}`, wantError: true},
+		{name: "legacy top k is rejected", config: `{"maxNumOfEndpoints":1,"topK":3}`, wantError: true},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			decoder := json.NewDecoder(strings.NewReader(test.config))
-			plugin, err := MaxScorePickerFactory("decode-top3-picker", decoder, nil)
+			decoder := fwkplugin.StrictDecoder(json.RawMessage(test.config))
+			plugin, err := MaxScorePickerFactory("decode-top-tier-picker", decoder, nil)
+			if test.wantError {
+				if err == nil {
+					t.Fatal("expected factory error")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("factory returned error: %v", err)
 			}
@@ -232,10 +246,10 @@ func TestMaxScorePickerFactoryTopK(t *testing.T) {
 			if !ok {
 				t.Fatalf("expected *MaxScorePicker, got %T", plugin)
 			}
-			if p.topK != test.wantTopK {
-				t.Fatalf("expected topK %d, got %d", test.wantTopK, p.topK)
+			if p.topScoreRatio != test.wantTopScoreRatio {
+				t.Fatalf("expected topScoreRatio %v, got %v", test.wantTopScoreRatio, p.topScoreRatio)
 			}
-			if p.TypedName().Name != "decode-top3-picker" {
+			if p.TypedName().Name != "decode-top-tier-picker" {
 				t.Fatalf("expected configured name, got %q", p.TypedName().Name)
 			}
 		})

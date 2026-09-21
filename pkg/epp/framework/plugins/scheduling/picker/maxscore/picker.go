@@ -46,15 +46,18 @@ var _ fwksched.Picker = &MaxScorePicker{}
 func MaxScorePickerFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	parameters := picker.PickerParameters{
 		MaxNumOfEndpoints: picker.DefaultMaxNumOfEndpoints,
-		TopK:              picker.DefaultTopK,
+		TopScoreRatio:     picker.DefaultTopScoreRatio,
 	}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' picker - %w", MaxScorePickerType, err)
 		}
 	}
+	if parameters.TopScoreRatio <= 0 || parameters.TopScoreRatio > 1 {
+		return nil, fmt.Errorf("topScoreRatio must be within (0, 1], got %v", parameters.TopScoreRatio)
+	}
 
-	return NewMaxScorePicker(parameters.MaxNumOfEndpoints).WithTopK(parameters.TopK).WithName(name), nil
+	return NewMaxScorePicker(parameters.MaxNumOfEndpoints).WithTopScoreRatio(parameters.TopScoreRatio).WithName(name), nil
 }
 
 // NewMaxScorePicker initializes a new MaxScorePicker and returns its pointer.
@@ -66,15 +69,15 @@ func NewMaxScorePicker(maxNumOfEndpoints int) *MaxScorePicker {
 	return &MaxScorePicker{
 		typedName:         fwkplugin.TypedName{Type: MaxScorePickerType, Name: MaxScorePickerType},
 		maxNumOfEndpoints: maxNumOfEndpoints,
-		topK:              picker.DefaultTopK,
+		topScoreRatio:     picker.DefaultTopScoreRatio,
 	}
 }
 
 // MaxScorePicker picks endpoint(s) with the highest score calculated during the scoring phase.
 type MaxScorePicker struct {
 	typedName         fwkplugin.TypedName
-	maxNumOfEndpoints int // maximum number of endpoints to pick
-	topK              int // number of highest-scoring endpoints eligible for randomized selection
+	maxNumOfEndpoints int     // maximum number of endpoints to pick
+	topScoreRatio     float64 // minimum fraction of the highest score eligible for randomized selection
 }
 
 // WithName sets the picker's name
@@ -83,12 +86,12 @@ func (p *MaxScorePicker) WithName(name string) *MaxScorePicker {
 	return p
 }
 
-// WithTopK sets the number of highest-scoring endpoints eligible for randomized selection.
-func (p *MaxScorePicker) WithTopK(topK int) *MaxScorePicker {
-	if topK <= 0 {
-		topK = picker.DefaultTopK
+// WithTopScoreRatio sets the minimum fraction of the highest score eligible for randomized selection.
+func (p *MaxScorePicker) WithTopScoreRatio(topScoreRatio float64) *MaxScorePicker {
+	if topScoreRatio <= 0 || topScoreRatio > 1 {
+		topScoreRatio = picker.DefaultTopScoreRatio
 	}
-	p.topK = topK
+	p.topScoreRatio = topScoreRatio
 	return p
 }
 
@@ -115,15 +118,18 @@ func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.S
 		return 0
 	})
 
-	// Randomize the eligible top-K set when it is larger than the requested output. Keeping the
-	// sorted order when maxNumOfEndpoints already covers topK preserves the legacy multi-endpoint
-	// behavior.
-	topK := max(p.topK, p.maxNumOfEndpoints)
-	if topK > len(scoredEndpoints) {
-		topK = len(scoredEndpoints)
+	// Randomize endpoints whose score is within the configured ratio of the maximum. Keep enough
+	// candidates to preserve the legacy multi-endpoint behavior when more endpoints are requested.
+	topTierSize := 0
+	if len(scoredEndpoints) > 0 {
+		minimumTopTierScore := scoredEndpoints[0].Score * p.topScoreRatio
+		for topTierSize < len(scoredEndpoints) && scoredEndpoints[topTierSize].Score >= minimumTopTierScore {
+			topTierSize++
+		}
 	}
-	if topK > p.maxNumOfEndpoints {
-		picker.ShuffleScoredEndpoints(scoredEndpoints[:topK])
+	topTierSize = max(topTierSize, min(p.maxNumOfEndpoints, len(scoredEndpoints)))
+	if topTierSize > p.maxNumOfEndpoints {
+		picker.ShuffleScoredEndpoints(scoredEndpoints[:topTierSize])
 	}
 
 	// if we have enough endpoints to return keep only the "maxNumOfEndpoints" highest scored endpoints
