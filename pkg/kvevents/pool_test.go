@@ -42,6 +42,7 @@ type recordingIndex struct {
 	kvblock.Index
 	getRequestKeyCalls int
 	evictCalls         int
+	lastEvictKeyType   kvblock.KeyType
 }
 
 func (i *recordingIndex) GetRequestKey(ctx context.Context, engineKey kvblock.BlockHash) (kvblock.BlockHash, error) {
@@ -56,6 +57,7 @@ func (i *recordingIndex) Evict(
 	entries []kvblock.PodEntry,
 ) error {
 	i.evictCalls++
+	i.lastEvictKeyType = keyType
 	return i.Index.Evict(ctx, key, keyType, entries)
 }
 
@@ -1351,6 +1353,83 @@ func counterValue(t *testing.T, c prometheus.Counter) float64 {
 	var m dto.Metric
 	require.NoError(t, c.Write(&m))
 	return m.GetCounter().GetValue()
+}
+
+func newSGLangNativePool(t *testing.T) (*Pool, kvblock.Index, kvblock.TokenProcessor) {
+	t.Helper()
+	idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+	require.NoError(t, err)
+	tp, err := kvblock.NewTokenProcessor(&kvblock.TokenProcessorConfig{
+		BlockSizeTokens: 4,
+		HashAlgo:        kvblock.HashAlgoSGLang,
+		Bigram:          true,
+	})
+	require.NoError(t, err)
+	pool := NewPool(DefaultConfig(), idx, tp, nil)
+	return pool, idx, tp
+}
+
+func TestSGLangNativeHash_IndexesEngineHashesWithoutParent(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newSGLangNativePool(t)
+	wrapped := &recordingIndex{Index: idx}
+	pool.index = wrapped
+
+	golden := int64(-2735951481331064195)
+	childHash := uint64(golden)
+	batch := &EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: []uint64{childHash},
+				Tokens:      []uint32{10, 20, 30, 40},
+				ParentHash:  999, // missing on purpose
+				BlockSize:   4,
+			},
+		},
+	}
+	pool.processEventBatch(ctx, batch, "pod-native", "test-model")
+
+	assert.Zero(t, wrapped.getRequestKeyCalls, "native ingest must not consult the parent mapping")
+
+	keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, []uint32{10, 20, 30, 40}, "", nil)
+	require.NoError(t, err)
+	require.Equal(t, []kvblock.BlockHash{kvblock.BlockHash(childHash)}, keys)
+
+	result, err := idx.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	require.Len(t, result[keys[0]], 1)
+	assert.Equal(t, "pod-native", result[keys[0]][0].PodIdentifier)
+
+	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(childHash))
+	require.Error(t, err, "native ingest must not retain an engine-key mapping")
+}
+
+func TestSGLangNativeHash_EvictsRequestKeysWithoutMapping(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, _ := newSGLangNativePool(t)
+	wrapped := &recordingIndex{Index: idx}
+	pool.index = wrapped
+
+	golden := int64(-2735951481331064195)
+	childHash := uint64(golden)
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes: []uint64{childHash},
+			Tokens:      []uint32{10, 20, 30, 40},
+			BlockSize:   4,
+		},
+	}}, "pod-native", "test-model")
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockRemovedEvent{BlockHashes: []uint64{childHash}},
+	}}, "pod-native", "test-model")
+
+	assert.Equal(t, 1, wrapped.evictCalls)
+	assert.Equal(t, kvblock.RequestKey, wrapped.lastEvictKeyType)
+
+	result, err := idx.Lookup(ctx, []kvblock.BlockHash{kvblock.BlockHash(childHash)}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, result[kvblock.BlockHash(childHash)])
 }
 
 func TestEffectiveReplayPort(t *testing.T) {

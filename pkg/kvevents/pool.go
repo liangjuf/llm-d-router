@@ -493,6 +493,28 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				engineKeys[i] = kvblock.BlockHash(hash)
 			}
 
+			// SGLang-native hashing: lookup keys ARE the engine hashes. The
+			// parent SHA256 digest is not recoverable from the truncated
+			// parent_block_hash, so recomputing request keys from this page's
+			// tokens would disagree with the worker. Index the published
+			// hashes directly and skip the parent-mapping gate.
+			if p.tokenProcessor.IndexesEngineHashes() {
+				if len(engineKeys) == 0 {
+					continue
+				}
+				// Lookup keys are the engine hashes. Pass a nil engineKeys
+				// slice so Add does not also write the identity mapping into
+				// engineToRequestKeys; that second copy grew without bound
+				// under HiCache churn and OOM'd the EPP.
+				if err := p.index.Add(ctx, nil, engineKeys, podEntries); err != nil {
+					debugLogger.Error(err, "Failed to add event to index",
+						"podIdentifier", podIdentifier, "event", ev)
+					continue
+				}
+				p.dedup.trackStore(storeScope, ev.BlockHashes)
+				continue
+			}
+
 			parentRequestKey := kvblock.EmptyBlockHash
 			if ev.ParentHash != 0 {
 				parentEngineKey := kvblock.BlockHash(ev.ParentHash)
@@ -640,10 +662,15 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			// Iterate over the surviving hashes and evict each key.
 			// The Index handles engine->request key resolution internally for both
-			// 1:1 (legacy) and 1:many (canonical) mappings.
+			// 1:1 (legacy) and 1:many (canonical) mappings. Native hashing
+			// stores hashes as request keys with no mapping, so evict that way.
+			evictType := kvblock.EngineKey
+			if p.tokenProcessor.IndexesEngineHashes() {
+				evictType = kvblock.RequestKey
+			}
 			for _, hash := range hashesToEvict {
 				engineKey := kvblock.BlockHash(hash)
-				if err := p.index.Evict(ctx, engineKey, kvblock.EngineKey, podEntries); err != nil {
+				if err := p.index.Evict(ctx, engineKey, evictType, podEntries); err != nil {
 					debugLogger.Error(err, "Failed to evict engine key from index",
 						"podIdentifier", podIdentifier, "engineKey", engineKey)
 					continue
