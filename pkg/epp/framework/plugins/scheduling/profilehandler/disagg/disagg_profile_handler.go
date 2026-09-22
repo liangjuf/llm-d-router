@@ -551,6 +551,7 @@ func (h *Handler) ProcessResults(
 
 	if prefillRes, ok := profileResults[h.prefillProfile]; ok && prefillRes != nil {
 		updatedResults[h.prefillProfile] = prefillRes
+		recordPrefillRouteSelection(prefillRes)
 	}
 
 	if encodeRes, ok := profileResults[h.encodeProfile]; ok && encodeRes != nil {

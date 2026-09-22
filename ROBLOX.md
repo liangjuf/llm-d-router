@@ -22,9 +22,9 @@ Adds a Kubernetes ConfigMap-backed syncer for sharing in-flight request state ac
 
 Retains valid metrics parsed before a malformed metric family and cancels decode work when prefill fails. These changes avoid discarding usable load signals and prevent orphaned decode requests.
 
-## Load-aware top-K selection
+## Load-aware top-tier selection
 
-Extends the max-score picker with `topK` so it can select randomly from the highest-scoring endpoints. This reduces hot-spotting while retaining score locality.
+Extends the max-score picker with `topScoreRatio` so it can select randomly from endpoints in the highest score tier. This reduces hot-spotting without selecting endpoints whose scores are substantially lower than the maximum.
 
 ## SGLang request compatibility
 

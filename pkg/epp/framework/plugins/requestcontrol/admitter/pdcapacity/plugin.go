@@ -47,6 +47,15 @@ const (
 	defaultPreallocThreshold         = 8.0
 	defaultPrefillWaitingThreshold   = 4
 	legacyRoleBoth                   = "both"
+
+	decisionAdmit  = "admit"
+	decisionReject = "reject"
+
+	reasonDecodeWaiting  = "decode_waiting"
+	reasonDecodeKV       = "decode_kv"
+	reasonDecodePrealloc = "decode_prealloc"
+	reasonPrefillWaiting = "prefill_waiting"
+	reasonStaleMetrics   = "stale_metrics"
 )
 
 // SignalConfig identifies a scalar endpoint metric and its rejection threshold.
@@ -232,6 +241,8 @@ func (a *Admitter) AdmitPool(ctx context.Context, request *fwksched.InferenceReq
 	now := time.Now()
 	prefillTotal, prefillAvailable := 0, 0
 	decodeTotal, decodeAvailable := 0, 0
+	prefillReasons := map[string]struct{}{}
+	decodeReasons := map[string]struct{}{}
 	logger := log.FromContext(ctx)
 	for _, endpoint := range endpoints {
 		prefillRole, decodeRole := endpointRoles(endpoint)
@@ -240,6 +251,7 @@ func (a *Admitter) AdmitPool(ctx context.Context, request *fwksched.InferenceReq
 			if ok, reason := a.prefillFeasible(endpoint, now, a.open); ok {
 				prefillAvailable++
 			} else {
+				prefillReasons[reason] = struct{}{}
 				logger.V(logutil.DEBUG).Info("P/D capacity admitter excluded prefill endpoint", "endpoint", endpointName(endpoint), "reason", reason)
 			}
 		}
@@ -248,6 +260,7 @@ func (a *Admitter) AdmitPool(ctx context.Context, request *fwksched.InferenceReq
 			if ok, reason := a.decodeFeasible(endpoint, now, a.open); ok {
 				decodeAvailable++
 			} else {
+				decodeReasons[reason] = struct{}{}
 				logger.V(logutil.DEBUG).Info("P/D capacity admitter excluded decode endpoint", "endpoint", endpointName(endpoint), "reason", reason)
 			}
 		}
@@ -255,6 +268,7 @@ func (a *Admitter) AdmitPool(ctx context.Context, request *fwksched.InferenceReq
 
 	if prefillAvailable > 0 && decodeAvailable > 0 {
 		a.setOpen(ctx, false, "prefill and decode recovery thresholds satisfied")
+		admissionDecisions.WithLabelValues(a.typedName.Name, decisionAdmit, "").Inc()
 		return nil
 	}
 
@@ -268,8 +282,11 @@ func (a *Admitter) AdmitPool(ctx context.Context, request *fwksched.InferenceReq
 		reason = "recovery pending: " + reason
 	}
 	a.setOpen(ctx, true, reason)
+	decisionReason := rejectionReason(prefillAvailable, decodeAvailable, prefillReasons, decodeReasons)
+	admissionDecisions.WithLabelValues(a.typedName.Name, decisionReject, decisionReason).Inc()
 	logger.Info("P/D capacity admission rejected request",
 		"reason", reason,
+		"decisionReason", decisionReason,
 		"prefillAvailable", prefillAvailable,
 		"prefillTotal", prefillTotal,
 		"decodeAvailable", decodeAvailable,
@@ -280,14 +297,14 @@ func (a *Admitter) AdmitPool(ctx context.Context, request *fwksched.InferenceReq
 func (a *Admitter) prefillFeasible(endpoint fwksched.Endpoint, now time.Time, recovering bool) (bool, string) {
 	waiting, ok := a.readFreshSample(endpoint, attrmetrics.WaitingQueueSampleKey, now)
 	if !ok {
-		return false, "missing, stale or invalid ordinary waiting queue metric"
+		return false, reasonStaleMetrics
 	}
 	threshold := a.config.Prefill.WaitingQueueThreshold
 	if recovering {
 		threshold = a.config.Prefill.WaitingQueueRecoveryThreshold
 	}
 	if waiting >= float64(threshold) {
-		return false, "ordinary waiting queue threshold reached"
+		return false, reasonPrefillWaiting
 	}
 	return true, ""
 }
@@ -303,26 +320,52 @@ func (a *Admitter) decodeFeasible(endpoint fwksched.Endpoint, now time.Time, rec
 	}
 	waiting, ok := a.readFreshSample(endpoint, attrmetrics.WaitingQueueSampleKey, now)
 	if !ok {
-		return false, "missing, stale or invalid ordinary waiting queue metric"
+		return false, reasonStaleMetrics
 	}
 	if waiting >= float64(waitingThreshold) {
-		return false, "ordinary waiting queue threshold reached"
+		return false, reasonDecodeWaiting
 	}
 	kv, ok := a.readFreshSample(endpoint, attrmetrics.KVCacheUtilizationSampleKey, now)
 	if !ok || kv > 1 {
-		return false, "missing, stale or invalid KV utilization metric"
+		return false, reasonStaleMetrics
 	}
 	if kv >= kvThreshold {
-		return false, "KV utilization threshold reached"
+		return false, reasonDecodeKV
 	}
 	prealloc, ok := a.readFreshSample(endpoint, attrmetrics.ScalarMetricSampleKey(a.config.Decode.Prealloc.AttributeKey), now)
 	if !ok {
-		return false, "missing, stale or invalid decode preallocation metric"
+		return false, reasonStaleMetrics
 	}
 	if prealloc >= preallocThreshold {
-		return false, "decode preallocation threshold reached"
+		return false, reasonDecodePrealloc
 	}
 	return true, ""
+}
+
+func rejectionReason(prefillAvailable, decodeAvailable int, prefillReasons, decodeReasons map[string]struct{}) string {
+	blockedReasons := map[string]struct{}{}
+	if prefillAvailable == 0 {
+		for reason := range prefillReasons {
+			blockedReasons[reason] = struct{}{}
+		}
+	}
+	if decodeAvailable == 0 {
+		for reason := range decodeReasons {
+			blockedReasons[reason] = struct{}{}
+		}
+	}
+	for _, reason := range []string{
+		reasonStaleMetrics,
+		reasonPrefillWaiting,
+		reasonDecodeWaiting,
+		reasonDecodeKV,
+		reasonDecodePrealloc,
+	} {
+		if _, ok := blockedReasons[reason]; ok {
+			return reason
+		}
+	}
+	return reasonStaleMetrics
 }
 
 func (a *Admitter) readFreshSample(endpoint fwksched.Endpoint, key string, now time.Time) (float64, bool) {

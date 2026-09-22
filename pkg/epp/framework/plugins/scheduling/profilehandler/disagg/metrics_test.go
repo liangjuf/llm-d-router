@@ -17,10 +17,13 @@ limitations under the License.
 package disagg
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 func TestSchedulerPDDecisionCount(t *testing.T) {
@@ -146,5 +149,35 @@ func TestDisaggDecisionType(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("DisaggDecisionType(%v, %v) = %q, want %q", tt.encodeUsed, tt.prefillUsed, got, tt.want)
 		}
+	}
+}
+
+func TestHandlerRecordsPrefillRouteSelection(t *testing.T) {
+	LlmdRouteSelectionsTotal.Reset()
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", nil, nil)
+	request := &scheduling.InferenceRequest{Headers: map[string]string{}}
+
+	_, err := h.ProcessResults(context.Background(), request, map[string]*scheduling.ProfileRunResult{
+		defaultDecodeProfile:  makeProfileRunResult("decode-a"),
+		defaultPrefillProfile: makeProfileRunResult("prefill-a", "prefill-b"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = h.ProcessResults(context.Background(), request, map[string]*scheduling.ProfileRunResult{
+		defaultDecodeProfile: makeProfileRunResult("decode-a"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := `
+		# HELP llm_d_epp_route_selections_total [ALPHA] Total number of selected endpoints by disaggregated serving role.
+		# TYPE llm_d_epp_route_selections_total counter
+		llm_d_epp_route_selections_total{endpoint_name="prefill-a",role="prefill"} 1
+	`
+	if err := testutil.CollectAndCompare(LlmdRouteSelectionsTotal, strings.NewReader(expected),
+		"llm_d_epp_route_selections_total"); err != nil {
+		t.Errorf("prefill route selection metric comparison failed: %v", err)
 	}
 }
